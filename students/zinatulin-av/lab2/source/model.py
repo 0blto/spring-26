@@ -1,139 +1,117 @@
+import random
+
 import numpy as np
+from sklearn.base import BaseEstimator, ClassifierMixin
 from sklearn.tree import DecisionTreeClassifier
+from sklearn.metrics import accuracy_score
 
 
-class RandomForestClassifier:
+def bagging(X, y):
+    x_used = []
+    y_used = []
+    x_unused = []
+    y_unused = []
+    n = X.shape[0]
+    used_indices = set()
+    for i in range(n):
+        index = random.randint(0, n - 1)
+        x_used.append(X[index].copy())
+        y_used.append(y[index].copy())
+        used_indices.add(index)
+    for index in range(n):
+        if index not in used_indices:
+            x_unused.append(X[index].copy())
+            y_unused.append(y[index].copy())
+    return np.array(x_used), np.array(y_used), np.array(x_unused), np.array(y_unused)
 
-    def __init__(self, n_estimators=100, max_features='sqrt', max_depth=None,
-                 min_samples_split=2, min_samples_leaf=1, random_state=None):
+
+class _TreeMeta:
+    def __init__(self, X_unused, y_unused):
+        self.X_unused = X_unused
+        self.y_unused = y_unused
+
+
+class RandomForestClassifier(BaseEstimator, ClassifierMixin):
+    def __init__(self, n_estimators=10, max_depth=None,
+                 min_samples_split=2, min_samples_leaf=1,
+                 max_features=None, random_state=None):
         self.n_estimators = n_estimators
-        self.max_features = max_features
         self.max_depth = max_depth
         self.min_samples_split = min_samples_split
         self.min_samples_leaf = min_samples_leaf
+        self.max_features = max_features
         self.random_state = random_state
 
-        self.trees_ = []
-        self.feat_indices_ = []
-        self.oob_indices_ = []
-        self.classes_ = None
-        self.n_features_ = None
-        self.oob_score_ = None
-        self.feature_importances_ = None
-
-    def _get_max_features(self, n_features):
-        if self.max_features is None:
-            return n_features
-        if self.max_features == 'sqrt':
-            return max(1, int(np.sqrt(n_features)))
-        if self.max_features == 'log2':
-            return max(1, int(np.log2(n_features)) + 1)
-        if isinstance(self.max_features, float):
-            return max(1, int(self.max_features * n_features))
-        if isinstance(self.max_features, int):
-            return min(self.max_features, n_features)
-        return n_features
-
     def fit(self, X, y):
-        self.n_features_ = X.shape[1]
+        self.clfs_ = []
+        self.clfs_meta_ = []
+        self._oob_score = None
         self.classes_ = np.unique(y)
-        n_samples = X.shape[0]
-        n_feat = self._get_max_features(self.n_features_)
-        rng = np.random.default_rng(self.random_state)
 
-        self.trees_ = []
-        self.feat_indices_ = []
-        self.oob_indices_ = []
+        tree_kwargs = dict(
+            max_depth=self.max_depth,
+            min_samples_split=self.min_samples_split,
+            min_samples_leaf=self.min_samples_leaf,
+            max_features=self.max_features,
+        )
 
         for _ in range(self.n_estimators):
-            seed = rng.integers(0, 2**31 - 1)
-            boot_idx = rng.choice(n_samples, size=n_samples, replace=True)
-            oob_mask = np.ones(n_samples, dtype=bool)
-            oob_mask[boot_idx] = False
-            oob_idx = np.where(oob_mask)[0]
-
-            feat_idx = rng.choice(self.n_features_, size=n_feat, replace=False)
-
-            tree = DecisionTreeClassifier(
-                max_depth=self.max_depth,
-                min_samples_split=self.min_samples_split,
-                min_samples_leaf=self.min_samples_leaf,
-                random_state=int(seed),
-            )
-            tree.fit(X[np.ix_(boot_idx, feat_idx)], y[boot_idx])
-
-            self.trees_.append(tree)
-            self.feat_indices_.append(feat_idx)
-            self.oob_indices_.append(oob_idx)
-
-        self.oob_score_ = self._compute_oob_score(X, y)
+            clf = DecisionTreeClassifier(**tree_kwargs)
+            X_t, y_t, X_oob, y_oob = bagging(X, y)
+            clf.fit(X_t, y_t)
+            self.clfs_.append(clf)
+            self.clfs_meta_.append(_TreeMeta(X_oob, y_oob))
         return self
-
-    def _compute_oob_score(self, X, y):
-        n_samples = X.shape[0]
-        n_classes = len(self.classes_)
-        oob_preds = np.zeros((n_samples, n_classes))
-        oob_counts = np.zeros(n_samples)
-
-        for tree, feat_idx, oob_idx in zip(self.trees_, self.feat_indices_, self.oob_indices_):
-            if len(oob_idx) == 0:
-                continue
-            proba = tree.predict_proba(X[np.ix_(oob_idx, feat_idx)])
-            for i, idx in enumerate(oob_idx):
-                oob_preds[idx] += proba[i]
-                oob_counts[idx] += 1
-
-        valid = oob_counts > 0
-        if not np.any(valid):
-            return 0.0
-        pred_labels = self.classes_[np.argmax(oob_preds[valid], axis=1)]
-        return np.mean(pred_labels == y[valid])
 
     def predict_proba(self, X):
-        n_samples = X.shape[0]
-        n_classes = len(self.classes_)
-        proba_sum = np.zeros((n_samples, n_classes))
-
-        for tree, feat_idx in zip(self.trees_, self.feat_indices_):
-            proba_sum += tree.predict_proba(X[:, feat_idx])
-
-        return proba_sum / len(self.trees_)
+        probs = self.clfs_[0].predict_proba(X)
+        for i in range(1, len(self.clfs_)):
+            probs += self.clfs_[i].predict_proba(X)
+        return probs / len(self.clfs_)
 
     def predict(self, X):
-        proba = self.predict_proba(X)
-        return self.classes_[np.argmax(proba, axis=1)]
+        probs = self.predict_proba(X)
+        return self.classes_[np.argmax(probs, axis=1)]
 
-    def get_feature_importances_oob(self, X, y, n_repeats=1, random_state=None):
-        rng = np.random.default_rng(random_state)
-        base = self._compute_oob_score(X, y)
-        importances = np.zeros(self.n_features_)
+    def _calculate_oob(self):
+        oob_values = []
+        for i in range(len(self.clfs_)):
+            preds = self.clfs_[i].predict(self.clfs_meta_[i].X_unused)
+            oob_values.append(accuracy_score(self.clfs_meta_[i].y_unused, preds))
+        self._oob_score = np.array(oob_values).mean()
+        return np.array(oob_values)
 
-        for j in range(self.n_features_):
-            drops = []
-            for _ in range(n_repeats):
-                X_perm = X.copy()
-                X_perm[:, j] = rng.permutation(X_perm[:, j])
-                perm_score = self._compute_oob_score(X_perm, y)
-                drops.append(base - perm_score)
-            importances[j] = np.mean(drops)
+    @property
+    def oob_score_(self):
+        if self._oob_score is None:
+            self._calculate_oob()
+        return self._oob_score
 
-        if importances.sum() > 0:
-            importances = importances / importances.sum()
+    def _calculate_feature_importance(self):
+        oob_values = []
+        for i in range(len(self.clfs_)):
+            preds = self.clfs_[i].predict(self.clfs_meta_[i].X_unused)
+            oob_values.append(accuracy_score(self.clfs_meta_[i].y_unused, preds))
+        oob_score = np.array(oob_values).mean()
 
-        self.feature_importances_ = importances
-        return importances
+        X_unused = self.clfs_meta_[-1].X_unused
+        y_unused = self.clfs_meta_[-1].y_unused
+        n_features = X_unused.shape[1]
 
-    def get_params(self, deep=True):
-        return {
-            'n_estimators': self.n_estimators,
-            'max_features': self.max_features,
-            'max_depth': self.max_depth,
-            'min_samples_split': self.min_samples_split,
-            'min_samples_leaf': self.min_samples_leaf,
-            'random_state': self.random_state,
-        }
+        feature_importances = []
+        for f in range(n_features):
+            X_copy = X_unused.copy()
+            np.random.shuffle(X_copy[:, f])
+            oob_shuffled = []
+            for i in range(len(self.clfs_)):
+                preds = self.clfs_[i].predict(X_copy)
+                oob_shuffled.append(accuracy_score(y_unused, preds))
+            oob_score_shuffled = np.array(oob_shuffled).mean()
+            feature_importances.append(
+                (oob_score_shuffled - oob_score) / oob_score
+            )
+        return feature_importances
 
-    def set_params(self, **params):
-        for key, val in params.items():
-            setattr(self, key, val)
-        return self
+    def score(self, X, y):
+        self._calculate_oob()
+        return self._oob_score
