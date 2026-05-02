@@ -92,12 +92,21 @@ class MyRandomForestClassifier(BaseEstimator, ClassifierMixin):
 
         rng = np.random.RandomState(self.random_state)
 
-        for i in range(self.n_estimators):  # t = 1, ..., T
+        # Порог отбора: дерево идёт в ансамбль, только если оно лучше случайного угадывания
+        # Для классификации случайное угадывание = 1 / n_classes (для бинарной = 0.5)
+        select_threshold = 1.0 / n_classes
+
+        # Строим деревья, пока не наберем n_estimators хороших алгоритмов.
+        # Используем while, так как плохие деревья будут отбрасываться.
+        max_attempts = self.n_estimators * 3  # Защита от бесконечного цикла
+        attempts = 0
+
+        while len(self.estimators_) < self.n_estimators and attempts < max_attempts:
+            attempts += 1
             tree_seed = rng.randint(0, 2 ** 31 - 1)
 
             # Бутстреп-выборка
             sample_indices, oob_indices = self._bootstrap_sample(n_samples, tree_seed)
-            self.oob_samples_.append(oob_indices)
 
             # Обучение базового алгоритма
             tree = DecisionTreeClassifier(
@@ -109,7 +118,20 @@ class MyRandomForestClassifier(BaseEstimator, ClassifierMixin):
                 class_weight=self.class_weight
             )
             tree.fit(X[sample_indices], y[sample_indices])
+
+            # Проверка качества базового алгоритма (Не каждый базовый алгоритм идёт в ансамбль)
+            if len(oob_indices) > 0:
+                oob_accuracy = tree.score(X[oob_indices], y[oob_indices])
+                if oob_accuracy <= select_threshold:
+                    # Дерево не лучше случайного — отбрасываем его
+                    continue
+            else:
+                # Если нет OOB-объектов (крайне редкий случай на маленьких выборках), тоже отбрасываем
+                continue
+
+            # Дерево прошло отбор — добавляем в ансамбль
             self.estimators_.append(tree)
+            self.oob_samples_.append(oob_indices)
 
             # накапливаем OOB предсказания
             # OOB(xᵢ) = (1/|Tᵢ|) Σₜ∈Tᵢ bₜ(xᵢ)
