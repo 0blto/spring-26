@@ -49,13 +49,13 @@ def prepare_features(df: pd.DataFrame, drop_na: bool = True) -> pd.DataFrame:
 
     # Convert target: assuming 0/1 -> -1/1
     target_original = df[target_col].copy()
-    if set(np.unique(target_original)).issubset({0, 1}):
-        df[target_col] = df[target_col].replace({0: -1, 1: 1})
-    else:
+    unique_targets = set(np.unique(target_original))
+    if unique_targets.issubset({-1, 1}):
+        df[target_col] = df[target_col].replace({-1: 0, 1: 1})
+    elif not unique_targets.issubset({0, 1}):
         # If already other values, convert: 0->-1, 1->1, others keep but flag
-        unique_vals = np.unique(target_original)
-        print(f"Warning: Target values are {unique_vals}, expected 0/1")
-        df[target_col] = df[target_col].apply(lambda x: -1 if x == 0 else 1)
+        print(f"Warning: Target values are {unique_targets}, expected 0/1")
+        df[target_col] = df[target_col].apply(lambda x: 0 if x <= 0 else 1)
 
     # Rename to 'target' for consistency
     df = df.rename(columns={target_col: 'target'})

@@ -3,7 +3,7 @@ import pandas as pd
 import os
 
 DATASET_NAME = 'taweilo/loan-approval-classification-data'
-DATA_FILENAME = "loan_approval.csv"  # Might be actual filename; adjust if needed
+DATA_FILENAME = "loan_approval.csv"
 
 
 def load_data_from_csv(file_path: str) -> pd.DataFrame:

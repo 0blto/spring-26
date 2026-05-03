@@ -9,7 +9,6 @@ def run_data_pipeline(
     random_seed: Optional[int] = None,
     return_split: bool = True,
     train_size: float = 0.7,
-    drop_na: bool = True,
     save_path: Optional[str] = None
 ):
     """
@@ -22,7 +21,6 @@ def run_data_pipeline(
     :param random_seed: Random seed for reproducibility
     :param return_split: If True, return split arrays; else return full DataFrame
     :param train_size: Proportion for training set
-    :param drop_na: Drop rows with NaNs
     :param save_path: Optional path to save processed CSV
 
     :return: If return_split: X_train, X_test, y_train, y_test
