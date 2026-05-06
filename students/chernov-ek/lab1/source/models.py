@@ -266,6 +266,182 @@ class DecisionTreeClassifier:
             self.node,
         )
 
+    def _is_leaf(self, node: Node) -> bool:
+        """
+        Проверяет, является ли узел листом дерева.
+
+        Parameters:
+            node (Node): Узел дерева решений. По умолчанию: нет.
+
+        Returns:
+            bool: True, если у узла нет дочерних ветвей.
+
+        Fallbacks:
+            Если children равно None или пустому списку, узел считается листом.
+        """
+        # Лист определяется по отсутствию дочерних ветвей для обхода.
+        return not node.children
+
+    def _prune_node_to_leaf(self, node: Node) -> dict[str, object]:
+        """
+        Временно схлопывает поддерево в лист и возвращает состояние для отката.
+
+        Parameters:
+            node (Node): Узел дерева решений. По умолчанию: нет.
+
+        Returns:
+            dict[str, object]: Сохранённое состояние внутренних полей узла.
+
+        Fallbacks:
+            Если узел уже лист, возвращается его текущее состояние без дополнительных эффектов.
+        """
+        # Сохраняем внутреннее состояние узла, чтобы можно было откатить редукцию.
+        state = {
+            "value": node.value,
+            "feature_id": node.feature_id,
+            "threshold": node.threshold,
+            "is_numeric": node.is_numeric,
+            "children": node.children,
+            "branch_probabilities": node.branch_probabilities,
+            "missing_values": node.missing_values,
+        }
+
+        # Превращаем узел в лист с прогнозом большинства для текущего поддерева.
+        node.value = str(node.prediction)
+        node.feature_id = None
+        node.threshold = None
+        node.is_numeric = False
+        node.children = None
+        node.branch_probabilities = None
+        node.missing_values = None
+        return state
+
+    def _restore_pruned_node(self, node: Node, state: dict[str, object]) -> None:
+        """
+        Восстанавливает внутренний узел после неудачной попытки редукции.
+
+        Parameters:
+            node (Node): Узел дерева решений. По умолчанию: нет.
+            state (dict[str, object]): Сохранённое состояние узла. По умолчанию: нет.
+
+        Returns:
+            None: Поля узла восстанавливаются на месте.
+
+        Fallbacks:
+            Если в словаре нет части ключей, узел получит значение None для отсутствующих полей.
+        """
+        # Возвращаем параметры разбиения, если редукция ухудшила качество.
+        node.value = state.get("value")
+        node.feature_id = state.get("feature_id")
+        node.threshold = state.get("threshold")
+        node.is_numeric = bool(state.get("is_numeric"))
+        node.children = state.get("children")
+        node.branch_probabilities = state.get("branch_probabilities")
+        node.missing_values = state.get("missing_values")
+
+    def _calculate_accuracy(
+        self,
+        features: np.ndarray,
+        labels: np.ndarray,
+    ) -> float:
+        """
+        Вычисляет accuracy дерева на заданной выборке.
+
+        Parameters:
+            features (numpy.ndarray): Матрица признаков. По умолчанию: нет.
+            labels (numpy.ndarray): Истинные метки классов. По умолчанию: нет.
+
+        Returns:
+            float: Доля верно классифицированных объектов.
+
+        Fallbacks:
+            Если выборка пуста, возвращается 0.0.
+        """
+        # Пустую выборку нельзя использовать для сравнения вариантов редукции.
+        if len(features) == 0:
+            return 0.0
+
+        # Считаем долю совпадений между истинными и предсказанными метками.
+        predicted_labels = self.predict(features)
+        return float(np.mean(predicted_labels == labels))
+
+    def reduce(self, validation_features: np.ndarray, validation_labels: np.ndarray) -> None:
+        """
+        Выполняет постпрунинг дерева по валидационной выборке.
+
+        Parameters:
+            validation_features (numpy.ndarray): Признаки валидационной выборки. По умолчанию: нет.
+            validation_labels (numpy.ndarray): Метки валидационной выборки. По умолчанию: нет.
+
+        Returns:
+            None: Дерево редактируется на месте.
+
+        Fallbacks:
+            Если дерево не обучено или выборка пуста, метод ничего не меняет.
+        """
+        # Без построенного дерева редукцию запускать нельзя.
+        if self.node is None:
+            raise ValueError("The tree has not been trained. Call id3() first.")
+
+        # Преобразуем входы к массивам NumPy для единообразной обработки.
+        validation_features = np.array(validation_features)
+        validation_labels = np.array(validation_labels)
+
+        # Пустая валидационная выборка не даёт критерия для редукции.
+        if len(validation_features) == 0 or len(validation_labels) == 0:
+            return
+
+        # Запускаем обход снизу вверх, чтобы сначала упростить глубокие поддеревья.
+        self._reduce_recursive(self.node, validation_features, validation_labels)
+
+    def _reduce_recursive(
+        self,
+        node: Node,
+        validation_features: np.ndarray,
+        validation_labels: np.ndarray,
+    ) -> None:
+        """
+        Рекурсивно пытается редуцировать поддеревья снизу вверх.
+
+        Parameters:
+            node (Node): Текущий узел дерева. По умолчанию: нет.
+            validation_features (numpy.ndarray): Признаки валидационной выборки. По умолчанию: нет.
+            validation_labels (numpy.ndarray): Метки валидационной выборки. По умолчанию: нет.
+
+        Returns:
+            None: Изменения применяются к узлам на месте.
+
+        Fallbacks:
+            Если узел листовой, рекурсия завершается без действий.
+        """
+        # Листовые узлы уже минимальны и не требуют дополнительной обработки.
+        if self._is_leaf(node):
+            return
+
+        # Сначала редуцируем дочерние поддеревья, чтобы обработка шла снизу вверх.
+        for child in node.children:
+            if child.next is not None:
+                self._reduce_recursive(
+                    child.next,
+                    validation_features,
+                    validation_labels,
+                )
+
+        # Сравниваем качество исходного поддерева и листа на валидационной выборке.
+        original_accuracy = self._calculate_accuracy(
+            validation_features,
+            validation_labels,
+        )
+        node_state = self._prune_node_to_leaf(node)
+        reduced_accuracy = self._calculate_accuracy(
+            validation_features,
+            validation_labels,
+        )
+
+        # Откатываем редукцию, если она ухудшила качество классификации.
+        if reduced_accuracy < original_accuracy:
+            self._restore_pruned_node(node, node_state)
+
     def _id3_recursive(
         self,
         row_ids: list[int],
